@@ -248,157 +248,280 @@ function filterServicesForExecutor(services, executor) {
 
 function buildTaskSetForAmount(servicesForExecutor, targetAmount) {
   const minServices = 3;
-  const maxServices = 8;
+  const maxServices = Math.min(8, servicesForExecutor.length);
+  const maxAttempts = 360;
 
   if (servicesForExecutor.length < minServices) {
     return null;
   }
 
-  const shuffledServices = shuffleArray(servicesForExecutor.slice());
-  const suffixBounds = buildSuffixBounds(shuffledServices);
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const serviceCount = randomIntInclusive(minServices, maxServices);
+    const selectedServices = pickRandomSubset(servicesForExecutor, serviceCount);
+    const attemptResult = tryBuildTaskSetForSelectedServices(selectedServices, targetAmount);
+    if (attemptResult) {
+      return attemptResult;
+    }
+  }
 
-  function dfs(index, chosenCount, currentSum, chosenItems) {
-    if (currentSum > targetAmount) {
+  return null;
+}
+
+function tryBuildTaskSetForSelectedServices(selectedServices, targetAmount) {
+  const items = [];
+  let currentSum = 0;
+
+  for (let i = 0; i < selectedServices.length; i++) {
+    const service = selectedServices[i];
+    const remainingCount = selectedServices.length - i;
+    const remainingAmount = targetAmount - currentSum;
+    if (remainingAmount <= 0) {
       return null;
     }
-    if (chosenCount > maxServices) {
-      return null;
-    }
 
-    const remainingServices = shuffledServices.length - index;
-    if (chosenCount + remainingServices < minServices) {
-      return null;
-    }
+    const minTail = sumMinTotals(selectedServices, i + 1);
+    const maxTail = sumMaxTotals(selectedServices, i + 1);
 
-    if (chosenCount >= minServices && currentSum === targetAmount) {
-      return chosenItems.slice();
-    }
-
-    if (index >= shuffledServices.length) {
-      return null;
-    }
-
-    const needMin = Math.max(0, minServices - chosenCount);
-    const canTakeMax = Math.min(maxServices - chosenCount, remainingServices);
-
-    const suffix = suffixBounds[index];
-    if (needMin > 0) {
-      const minPossible = currentSum + suffix.minForK[needMin];
-      if (!isFinite(minPossible) || minPossible > targetAmount) {
+    if (remainingCount === 1) {
+      const exactLast = buildExactVariantForTotal(service, remainingAmount);
+      if (!exactLast) {
         return null;
       }
+      items.push(exactLast);
+      currentSum += exactLast.total;
+      continue;
     }
 
-    const maxPossible = currentSum + suffix.maxForK[canTakeMax];
-    if (!isFinite(maxPossible) || maxPossible < targetAmount) {
+    if (remainingCount === 2) {
+      const pair = buildPairForRemainingAmount(
+        service,
+        selectedServices[i + 1],
+        remainingAmount
+      );
+      if (!pair) {
+        return null;
+      }
+      items.push(pair[0], pair[1]);
+      currentSum += pair[0].total + pair[1].total;
+      break;
+    }
+
+    const minForCurrent = getMinTotalForService(service);
+    const maxForCurrent = getMaxTotalForService(service);
+    const minAllowedTotal = Math.max(minForCurrent, remainingAmount - maxTail);
+    const maxAllowedTotal = Math.min(maxForCurrent, remainingAmount - minTail);
+
+    if (minAllowedTotal > maxAllowedTotal) {
       return null;
     }
 
-    const service = shuffledServices[index];
-    const variants = buildServiceVariants(service);
-    shuffleArray(variants);
+    const variant = pickVariantForService(service, minAllowedTotal, maxAllowedTotal);
+    if (!variant) {
+      return null;
+    }
+    items.push(variant);
+    currentSum += variant.total;
+  }
 
-    for (let v = 0; v < variants.length; v++) {
-      const variant = variants[v];
-      const nextSum = currentSum + variant.total;
-      if (nextSum > targetAmount) {
-        continue;
-      }
+  return currentSum === targetAmount ? items : null;
+}
 
-      const remainingAfterTake = shuffledServices.length - (index + 1);
-      if (chosenCount + 1 + remainingAfterTake < minServices) {
-        continue;
-      }
+function buildPairForRemainingAmount(serviceA, serviceB, remainingAmount) {
+  const qtyAValues = getQtyCandidates(serviceA);
+  const qtyBValues = getQtyCandidates(serviceB);
 
-      const suffixAfter = suffixBounds[index + 1];
-      const needAfter = Math.max(0, minServices - (chosenCount + 1));
-      const canAfter = Math.min(maxServices - (chosenCount + 1), remainingAfterTake);
+  for (let i = 0; i < qtyAValues.length; i++) {
+    const qtyA = qtyAValues[i];
+    const minTotalA = qtyA * serviceA.minCost;
+    const maxTotalA = qtyA * serviceA.maxCost;
+    const lowA = Math.max(minTotalA, remainingAmount - getMaxTotalForService(serviceB));
+    const highA = Math.min(maxTotalA, remainingAmount - getMinTotalForService(serviceB));
 
-      if (needAfter <= canAfter) {
-        const minAfter = nextSum + suffixAfter.minForK[needAfter];
-        const maxAfter = nextSum + suffixAfter.maxForK[canAfter];
-        if (minAfter <= targetAmount && maxAfter >= targetAmount) {
-          chosenItems.push(variant);
-          const found = dfs(index + 1, chosenCount + 1, nextSum, chosenItems);
-          if (found) {
-            return found;
-          }
-          chosenItems.pop();
-        }
-      }
+    if (lowA > highA) {
+      continue;
     }
 
-    const skipFound = dfs(index + 1, chosenCount, currentSum, chosenItems);
-    if (skipFound) {
-      return skipFound;
+    const priceA = pickPriceForTotalRange(serviceA, qtyA, lowA, highA, remainingAmount);
+    if (priceA === null) {
+      continue;
     }
 
+    const totalA = qtyA * priceA;
+    const totalB = remainingAmount - totalA;
+    const variantB = buildExactVariantForTotal(serviceB, totalB);
+    if (!variantB) {
+      continue;
+    }
+
+    return [
+      buildVariant(serviceA, qtyA, priceA),
+      variantB,
+    ];
+  }
+
+  return null;
+}
+
+function buildExactVariantForTotal(service, targetTotal) {
+  const qtyValues = getQtyCandidates(service);
+  shuffleArray(qtyValues);
+
+  for (let i = 0; i < qtyValues.length; i++) {
+    const qty = qtyValues[i];
+    if (targetTotal % qty !== 0) {
+      continue;
+    }
+    const price = targetTotal / qty;
+    if (price < service.minCost || price > service.maxCost) {
+      continue;
+    }
+    if (Math.floor(price) !== price) {
+      continue;
+    }
+    return buildVariant(service, qty, price);
+  }
+
+  return null;
+}
+
+function pickVariantForService(service, minAllowedTotal, maxAllowedTotal) {
+  const qtyValues = getQtyCandidates(service);
+  shuffleArray(qtyValues);
+
+  for (let i = 0; i < qtyValues.length; i++) {
+    const qty = qtyValues[i];
+    const minPriceByTotal = Math.ceil(minAllowedTotal / qty);
+    const maxPriceByTotal = Math.floor(maxAllowedTotal / qty);
+    const minPrice = Math.max(service.minCost, minPriceByTotal);
+    const maxPrice = Math.min(service.maxCost, maxPriceByTotal);
+
+    if (minPrice > maxPrice) {
+      continue;
+    }
+
+    const price = pickPriceCandidate(minPrice, maxPrice);
+    if (price === null) {
+      continue;
+    }
+
+    return buildVariant(service, qty, price);
+  }
+
+  return null;
+}
+
+function pickPriceForTotalRange(service, qty, minTotal, maxTotal, preferredTotal) {
+  const minPriceByTotal = Math.ceil(minTotal / qty);
+  const maxPriceByTotal = Math.floor(maxTotal / qty);
+  const minPrice = Math.max(service.minCost, minPriceByTotal);
+  const maxPrice = Math.min(service.maxCost, maxPriceByTotal);
+
+  if (minPrice > maxPrice) {
     return null;
   }
 
-  return dfs(0, 0, 0, []);
-}
-
-function buildServiceVariants(service) {
-  const variants = [];
-  const isPiece = service.unit === 'Штука';
-  const minQty = isPiece ? 1 : 1;
-  const maxQty = isPiece ? 5 : 1;
-
-  for (let qty = minQty; qty <= maxQty; qty++) {
-    for (let price = service.minCost; price <= service.maxCost; price++) {
-      variants.push({
-        serviceId: service.id,
-        description: service.description,
-        category: service.category,
-        qty: qty,
-        price: price,
-        total: qty * price,
-      });
+  const preferredPrice = Math.floor(preferredTotal / qty);
+  const priceCandidates = buildPriceCandidates(minPrice, maxPrice, preferredPrice);
+  for (let i = 0; i < priceCandidates.length; i++) {
+    const price = priceCandidates[i];
+    if (price >= minPrice && price <= maxPrice) {
+      return price;
     }
   }
 
-  return variants;
+  return null;
 }
 
-function buildSuffixBounds(services) {
-  const n = services.length;
-  const suffix = new Array(n + 1);
-  suffix[n] = {
-    minForK: [0],
-    maxForK: [0],
+function pickPriceCandidate(minPrice, maxPrice) {
+  const candidates = buildPriceCandidates(minPrice, maxPrice);
+  if (candidates.length === 0) {
+    return null;
+  }
+  return candidates[0];
+}
+
+function buildPriceCandidates(minPrice, maxPrice, preferredPrice) {
+  const unique = {};
+  const list = [];
+
+  function push(v) {
+    if (v < minPrice || v > maxPrice) {
+      return;
+    }
+    if (!unique[v]) {
+      unique[v] = true;
+      list.push(v);
+    }
+  }
+
+  push(minPrice);
+  push(maxPrice);
+  push(Math.floor((minPrice + maxPrice) / 2));
+  if (preferredPrice !== undefined && preferredPrice !== null) {
+    push(preferredPrice);
+    push(preferredPrice - 1);
+    push(preferredPrice + 1);
+  }
+
+  const randomCount = Math.min(4, Math.max(0, maxPrice - minPrice - 1));
+  for (let i = 0; i < randomCount; i++) {
+    push(randomIntInclusive(minPrice, maxPrice));
+  }
+
+  shuffleArray(list);
+  return list;
+}
+
+function getQtyCandidates(service) {
+  if (service.unit === 'Штука') {
+    return [1, 2, 3, 4, 5];
+  }
+  return [1];
+}
+
+function getMinTotalForService(service) {
+  return service.minCost;
+}
+
+function getMaxTotalForService(service) {
+  const maxQty = service.unit === 'Штука' ? 5 : 1;
+  return maxQty * service.maxCost;
+}
+
+function sumMinTotals(services, startIndex) {
+  let total = 0;
+  for (let i = startIndex; i < services.length; i++) {
+    total += getMinTotalForService(services[i]);
+  }
+  return total;
+}
+
+function sumMaxTotals(services, startIndex) {
+  let total = 0;
+  for (let i = startIndex; i < services.length; i++) {
+    total += getMaxTotalForService(services[i]);
+  }
+  return total;
+}
+
+function buildVariant(service, qty, price) {
+  return {
+    serviceId: service.id,
+    description: service.description,
+    category: service.category,
+    qty: qty,
+    price: price,
+    total: qty * price,
   };
+}
 
-  for (let i = n - 1; i >= 0; i--) {
-    const service = services[i];
-    const minOne = service.minCost;
-    const maxOne = service.unit === 'Штука' ? service.maxCost * 5 : service.maxCost;
-    const next = suffix[i + 1];
+function pickRandomSubset(arr, size) {
+  const shuffled = shuffleArray(arr.slice());
+  return shuffled.slice(0, size);
+}
 
-    const maxK = next.minForK.length;
-    const minForK = new Array(maxK + 1);
-    const maxForK = new Array(maxK + 1);
-
-    minForK[0] = 0;
-    maxForK[0] = 0;
-
-    for (let k = 1; k <= maxK; k++) {
-      const skipMin = next.minForK[k] !== undefined ? next.minForK[k] : Infinity;
-      const takeMin = next.minForK[k - 1] !== undefined ? minOne + next.minForK[k - 1] : Infinity;
-      minForK[k] = Math.min(skipMin, takeMin);
-
-      const skipMax = next.maxForK[k] !== undefined ? next.maxForK[k] : -Infinity;
-      const takeMax = next.maxForK[k - 1] !== undefined ? maxOne + next.maxForK[k - 1] : -Infinity;
-      maxForK[k] = Math.max(skipMax, takeMax);
-    }
-
-    suffix[i] = {
-      minForK: minForK,
-      maxForK: maxForK,
-    };
-  }
-
-  return suffix;
+function randomIntInclusive(min, max) {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
 function buildRegistryRow(lastCol, registryHeaders, payload) {
