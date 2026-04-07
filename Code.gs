@@ -5,6 +5,7 @@ function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('TEMED')
     .addItem('Подготовить реестр заданий', 'prepareTaskRegistry')
+    .addItem('Утвердить задание', 'approveTaskRegistry')
     .addToUi();
 }
 
@@ -32,14 +33,17 @@ function prepareTaskRegistry() {
     'Категория услуги',
   ]);
   const enterprisesData = getSheetDataWithHeaders(enterprisesSheet, ['Заказчик']);
-  const historyData = getSheetDataWithHeaders(historySheet, ['Месяц', 'Исполнитель', 'Заказчик']);
+  const historyData = getSheetDataWithHeaders(historySheet, ['Месяц', 'ИНН', 'Заказчик']);
   const registryHeaders = getHeaderMapOrThrow(registrySheet, [
+    'Месяц',
     'ИНН',
+    'ФИО',
     'Период ОТ',
     'Период ДО',
     'Заказчик',
     'Описание услуги',
     'Категория услуги',
+    'Единица',
     'Кол-во',
     'Цена',
     'Стоимость',
@@ -85,10 +89,10 @@ function prepareTaskRegistry() {
     if (!taskSet) {
       throw new Error('Не удалось подобрать услуги на сумму ' + amount + ' для исполнителя ' + executor + '.');
     }
-    const bannedCustomers = buildRecentCustomerSet(
+    const bannedCustomers = buildRecentCustomerSetByInn(
       historyData.rows,
       historyData.headerMap,
-      executor,
+      inn,
       monthCodeRaw
     );
     const pickedCustomers = pickTwoCustomers(customerPool, bannedCustomers, executor, monthCodeRaw);
@@ -97,12 +101,15 @@ function prepareTaskRegistry() {
     for (let j = 0; j < taskSet.length; j++) {
       const item = taskSet[j];
       outputRows.push(buildRegistryRow(registrySheet.getLastColumn(), registryHeaders, {
+        month: monthCodeRaw,
         inn: inn,
+        fullName: executor,
         periodFrom: period.from,
         periodTo: period.to,
         customer: assignedCustomers[j],
         description: item.description,
         category: item.category,
+        unit: item.unit,
         qty: item.qty,
         price: item.price,
         total: item.total,
@@ -255,7 +262,7 @@ function getPreviousMonthCodes(monthCode, count) {
   return result;
 }
 
-function buildRecentCustomerSet(historyRows, historyHeaderMap, executor, monthCode) {
+function buildRecentCustomerSetByInn(historyRows, historyHeaderMap, inn, monthCode) {
   const previousMonths = getPreviousMonthCodes(monthCode, 2);
   const monthMap = {};
   for (let i = 0; i < previousMonths.length; i++) {
@@ -265,14 +272,14 @@ function buildRecentCustomerSet(historyRows, historyHeaderMap, executor, monthCo
   const recentCustomers = {};
   for (let i = 0; i < historyRows.length; i++) {
     const row = historyRows[i];
-    const rowExecutor = toTrimmedString(row[historyHeaderMap['Исполнитель']]);
+    const rowInn = toTrimmedString(row[historyHeaderMap['ИНН']]);
     const rowMonth = toTrimmedString(row[historyHeaderMap['Месяц']]);
     const rowCustomer = toTrimmedString(row[historyHeaderMap['Заказчик']]);
 
-    if (!rowExecutor || !rowMonth || !rowCustomer) {
+    if (!rowInn || !rowMonth || !rowCustomer) {
       continue;
     }
-    if (rowExecutor !== executor) {
+    if (rowInn !== inn) {
       continue;
     }
     if (!monthMap[rowMonth]) {
@@ -638,6 +645,7 @@ function buildVariant(service, qty, price) {
     serviceId: service.id,
     description: service.description,
     category: service.category,
+    unit: service.unit,
     qty: qty,
     price: price,
     total: qty * price,
@@ -655,16 +663,301 @@ function randomIntInclusive(min, max) {
 
 function buildRegistryRow(lastCol, registryHeaders, payload) {
   const row = new Array(lastCol).fill('');
+  row[registryHeaders['Месяц']] = payload.month;
   row[registryHeaders['ИНН']] = payload.inn;
+  row[registryHeaders['ФИО']] = payload.fullName;
   row[registryHeaders['Период ОТ']] = payload.periodFrom;
   row[registryHeaders['Период ДО']] = payload.periodTo;
   row[registryHeaders['Заказчик']] = payload.customer;
   row[registryHeaders['Описание услуги']] = payload.description;
   row[registryHeaders['Категория услуги']] = payload.category;
+  row[registryHeaders['Единица']] = payload.unit;
   row[registryHeaders['Кол-во']] = payload.qty;
   row[registryHeaders['Цена']] = payload.price;
   row[registryHeaders['Стоимость']] = payload.total;
   return row;
+}
+
+/**
+ * Утверждает задания из листа "Реестр":
+ * - переносит данные в "История" с проверкой конфликтов по ключу ИНН+Месяц;
+ * - формирует XLSX-файлы по каждому заказчику.
+ */
+function approveTaskRegistry() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ui = SpreadsheetApp.getUi();
+
+  const registrySheet = getSheetByNameOrThrow(ss, 'Реестр');
+  const historySheet = getSheetByNameOrThrow(ss, 'История');
+
+  const registryData = getSheetDataWithHeaders(registrySheet, [
+    'Месяц',
+    'ИНН',
+    'ФИО',
+    'Заказчик',
+    'Период ОТ',
+    'Период ДО',
+    'Категория услуги',
+    'Описание услуги',
+    'Единица',
+    'Цена',
+    'Кол-во',
+    'Стоимость',
+  ]);
+  const historyData = getSheetDataWithHeaders(historySheet, ['Месяц', 'ИНН', 'ФИО', 'Заказчик']);
+
+  const filledRegistryRows = getFilledRegistryRows(registryData.rows, registryData.headerMap);
+  if (filledRegistryRows.length === 0) {
+    throw new Error('В листе "Реестр" нет строк для утверждения.');
+  }
+
+  const conflictingKeys = findConflictingKeys(historyData.rows, historyData.headerMap, filledRegistryRows, registryData.headerMap);
+  if (Object.keys(conflictingKeys).length > 0) {
+    const response = ui.alert(
+      'Обнаружены конфликты',
+      'В "История" уже есть записи по некоторым парам ИНН + Месяц. Заменить существующие записи?',
+      ui.ButtonSet.YES_NO
+    );
+    if (response !== ui.Button.YES) {
+      return;
+    }
+    replaceHistoryRowsByConflictingKeys(historySheet, historyData.headerMap, conflictingKeys, filledRegistryRows, registryData.headerMap);
+  } else {
+    appendRegistryRowsToHistory(historySheet, filledRegistryRows, registryData.headerMap);
+  }
+
+  createXlsxFilesByCustomer(filledRegistryRows, registryData.headerMap);
+}
+
+function getFilledRegistryRows(rows, headerMap) {
+  const result = [];
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const month = toTrimmedString(row[headerMap['Месяц']]);
+    const inn = toTrimmedString(row[headerMap['ИНН']]);
+    const fullName = toTrimmedString(row[headerMap['ФИО']]);
+    const customer = toTrimmedString(row[headerMap['Заказчик']]);
+    if (!month && !inn && !fullName && !customer) {
+      continue;
+    }
+    if (!month || !inn) {
+      throw new Error('В листе "Реестр" обнаружена строка с неполным ключом ИНН + Месяц.');
+    }
+    result.push(row);
+  }
+  return result;
+}
+
+function buildInnMonthKey(inn, month) {
+  return toTrimmedString(inn) + '||' + toTrimmedString(month);
+}
+
+function findConflictingKeys(historyRows, historyHeaderMap, registryRows, registryHeaderMap) {
+  const historyKeys = {};
+  for (let i = 0; i < historyRows.length; i++) {
+    const row = historyRows[i];
+    const month = toTrimmedString(row[historyHeaderMap['Месяц']]);
+    const inn = toTrimmedString(row[historyHeaderMap['ИНН']]);
+    if (!month || !inn) {
+      continue;
+    }
+    historyKeys[buildInnMonthKey(inn, month)] = true;
+  }
+
+  const conflicts = {};
+  for (let i = 0; i < registryRows.length; i++) {
+    const row = registryRows[i];
+    const key = buildInnMonthKey(row[registryHeaderMap['ИНН']], row[registryHeaderMap['Месяц']]);
+    if (historyKeys[key]) {
+      conflicts[key] = true;
+    }
+  }
+  return conflicts;
+}
+
+function replaceHistoryRowsByConflictingKeys(historySheet, historyHeaderMap, conflictingKeys, registryRows, registryHeaderMap) {
+  const lastCol = historySheet.getLastColumn();
+  const existingRows = historySheet.getLastRow() > 1
+    ? historySheet.getRange(2, 1, historySheet.getLastRow() - 1, lastCol).getValues()
+    : [];
+  const keptRows = [];
+
+  for (let i = 0; i < existingRows.length; i++) {
+    const row = existingRows[i];
+    const key = buildInnMonthKey(row[historyHeaderMap['ИНН']], row[historyHeaderMap['Месяц']]);
+    if (!conflictingKeys[key]) {
+      keptRows.push(row);
+    }
+  }
+
+  const newHistoryRows = mapRegistryRowsToHistoryRows(historySheet, registryRows, registryHeaderMap);
+  const finalRows = keptRows.concat(newHistoryRows);
+
+  if (historySheet.getLastRow() > 1) {
+    historySheet.getRange(2, 1, historySheet.getLastRow() - 1, lastCol).clearContent();
+  }
+  if (finalRows.length > 0) {
+    historySheet.getRange(2, 1, finalRows.length, lastCol).setValues(finalRows);
+  }
+}
+
+function appendRegistryRowsToHistory(historySheet, registryRows, registryHeaderMap) {
+  const mappedRows = mapRegistryRowsToHistoryRows(historySheet, registryRows, registryHeaderMap);
+  if (mappedRows.length === 0) {
+    return;
+  }
+  const startRow = historySheet.getLastRow() + 1;
+  historySheet.getRange(startRow, 1, mappedRows.length, historySheet.getLastColumn()).setValues(mappedRows);
+}
+
+function mapRegistryRowsToHistoryRows(historySheet, registryRows, registryHeaderMap) {
+  const historyHeaders = getHeaderMapOrThrow(historySheet, ['Месяц', 'ИНН', 'ФИО', 'Заказчик']);
+  const result = [];
+  for (let i = 0; i < registryRows.length; i++) {
+    const registryRow = registryRows[i];
+    const row = new Array(historySheet.getLastColumn()).fill('');
+    fillIfPresent(row, historyHeaders, 'Месяц', registryRow, registryHeaderMap, 'Месяц');
+    fillIfPresent(row, historyHeaders, 'ИНН', registryRow, registryHeaderMap, 'ИНН');
+    fillIfPresent(row, historyHeaders, 'ФИО', registryRow, registryHeaderMap, 'ФИО');
+    fillIfPresent(row, historyHeaders, 'Заказчик', registryRow, registryHeaderMap, 'Заказчик');
+    fillIfPresent(row, historyHeaders, 'Период ОТ', registryRow, registryHeaderMap, 'Период ОТ');
+    fillIfPresent(row, historyHeaders, 'Период ДО', registryRow, registryHeaderMap, 'Период ДО');
+    fillIfPresent(row, historyHeaders, 'Категория услуги', registryRow, registryHeaderMap, 'Категория услуги');
+    fillIfPresent(row, historyHeaders, 'Описание услуги', registryRow, registryHeaderMap, 'Описание услуги');
+    fillIfPresent(row, historyHeaders, 'Единица', registryRow, registryHeaderMap, 'Единица');
+    fillIfPresent(row, historyHeaders, 'Цена', registryRow, registryHeaderMap, 'Цена');
+    fillIfPresent(row, historyHeaders, 'Кол-во', registryRow, registryHeaderMap, 'Кол-во');
+    fillIfPresent(row, historyHeaders, 'Стоимость', registryRow, registryHeaderMap, 'Стоимость');
+    result.push(row);
+  }
+  return result;
+}
+
+function fillIfPresent(targetRow, targetHeaderMap, targetHeader, sourceRow, sourceHeaderMap, sourceHeader) {
+  if (targetHeaderMap[targetHeader] === undefined || sourceHeaderMap[sourceHeader] === undefined) {
+    return;
+  }
+  targetRow[targetHeaderMap[targetHeader]] = sourceRow[sourceHeaderMap[sourceHeader]];
+}
+
+function createXlsxFilesByCustomer(registryRows, registryHeaderMap) {
+  const folderId = '1CtIBNkjqSLfYfNruhAKJFGccqujCxK4x';
+  const folder = DriveApp.getFolderById(folderId);
+  const grouped = groupRegistryRowsByCustomer(registryRows, registryHeaderMap);
+  const today = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
+
+  const customers = Object.keys(grouped);
+  for (let i = 0; i < customers.length; i++) {
+    const customer = customers[i];
+    const rows = grouped[customer];
+    if (rows.length === 0) {
+      continue;
+    }
+    const month = toTrimmedString(rows[0][registryHeaderMap['Месяц']]);
+    const fileName = sanitizeFileName(customer + '_' + month + '_Задание_Консоль_' + today + '.xlsx');
+    const exportRows = buildExportRows(rows, registryHeaderMap, fileName);
+    saveRowsAsXlsx(folder, fileName, exportRows);
+  }
+}
+
+function groupRegistryRowsByCustomer(registryRows, registryHeaderMap) {
+  const grouped = {};
+  for (let i = 0; i < registryRows.length; i++) {
+    const row = registryRows[i];
+    const customer = toTrimmedString(row[registryHeaderMap['Заказчик']]);
+    if (!customer) {
+      continue;
+    }
+    if (!grouped[customer]) {
+      grouped[customer] = [];
+    }
+    grouped[customer].push(row);
+  }
+  return grouped;
+}
+
+function buildExportRows(rows, headerMap, fileName) {
+  const exportHeaders = [
+    'Телефон',
+    'ИНН',
+    'ФИО',
+    'Название',
+    'Проект',
+    'Локация',
+    'Удаленно',
+    'Период ОТ',
+    'Период ДО',
+    'Время ОТ',
+    'Время ДО',
+    'Комментарий для исп-ля',
+    'Внутр. комментарий',
+    'Категория услуги',
+    'Описание услуги',
+    'Единица',
+    'Цена',
+    'Кол-во',
+    'Стоимость',
+    'Теги',
+    'Перевод задания в Предложено',
+    'Разовое задание',
+    'Тип оплаты для разового',
+    'Сценарий приглашения',
+  ];
+
+  const out = [exportHeaders];
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    out.push([
+      '',
+      row[headerMap['ИНН']],
+      row[headerMap['ФИО']],
+      '',
+      '',
+      '',
+      '',
+      row[headerMap['Период ОТ']],
+      row[headerMap['Период ДО']],
+      '',
+      '',
+      '',
+      fileName,
+      row[headerMap['Категория услуги']],
+      row[headerMap['Описание услуги']],
+      row[headerMap['Единица']],
+      row[headerMap['Цена']],
+      row[headerMap['Кол-во']],
+      row[headerMap['Стоимость']],
+      '',
+      'да',
+      'нет',
+      'постоплата',
+      '',
+    ]);
+  }
+  return out;
+}
+
+function saveRowsAsXlsx(folder, fileName, values) {
+  const tempSpreadsheet = SpreadsheetApp.create('temp_export_' + new Date().getTime());
+  try {
+    const sheet = tempSpreadsheet.getSheets()[0];
+    sheet.clear();
+    sheet.getRange(1, 1, values.length, values[0].length).setValues(values);
+
+    const url = 'https://docs.google.com/spreadsheets/d/' + tempSpreadsheet.getId() + '/export?format=xlsx';
+    const response = UrlFetchApp.fetch(url, {
+      headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
+      muteHttpExceptions: false,
+    });
+    const blob = response.getBlob().setName(fileName);
+    folder.createFile(blob);
+  } finally {
+    DriveApp.getFileById(tempSpreadsheet.getId()).setTrashed(true);
+  }
+}
+
+function sanitizeFileName(name) {
+  return name.replace(/[\\\/:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim();
 }
 
 function toIntegerOrThrow(value, message) {
