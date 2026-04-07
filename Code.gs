@@ -1,3 +1,5 @@
+const HISTORY_SPREADSHEET_ID = '1A6eXDmV5VCTCctYNoilVDPIdc257ZipqGwetiRIWRaI';
+
 /**
  * Добавляет пользовательское меню.
  */
@@ -19,7 +21,7 @@ function prepareTaskRegistry() {
   const executorsSheet = getSheetByNameOrThrow(ss, 'Список исполнителей');
   const servicesSheet = getSheetByNameOrThrow(ss, 'Реестр услуг');
   const enterprisesSheet = getSheetByNameOrThrow(ss, 'Предприятия');
-  const historySheet = getSheetByNameOrThrow(ss, 'История');
+  const historySheet = getHistorySheetOrThrow();
   const registrySheet = getSheetByNameOrThrow(ss, 'Реестр');
 
   const prepData = getSheetDataWithHeaders(prepSheet, ['Месяц', 'Исполнитель', 'Сумма']);
@@ -137,6 +139,11 @@ function getSheetByNameOrThrow(ss, name) {
     throw new Error('Не найден обязательный лист: "' + name + '".');
   }
   return sheet;
+}
+
+function getHistorySheetOrThrow() {
+  const historySpreadsheet = SpreadsheetApp.openById(HISTORY_SPREADSHEET_ID);
+  return getSheetByNameOrThrow(historySpreadsheet, 'История');
 }
 
 function getSheetDataWithHeaders(sheet, requiredHeaders) {
@@ -301,7 +308,7 @@ function buildRecentCustomerSetByInn(historyRows, historyHeaderMap, inn, monthCo
       continue;
     }
 
-    recentCustomers[rowCustomer] = true;
+    recentCustomers[normalizeCustomerNameKey(rowCustomer)] = true;
   }
   return recentCustomers;
 }
@@ -311,7 +318,7 @@ function pickTwoCustomers(availableCustomers, bannedCustomers, executor, monthCo
 
   for (let i = 0; i < availableCustomers.length; i++) {
     const customer = availableCustomers[i];
-    if (!bannedCustomers[customer]) {
+    if (!bannedCustomers[normalizeCustomerNameKey(customer)]) {
       allowed.push(customer);
     }
   }
@@ -329,7 +336,7 @@ function pickTwoCustomers(availableCustomers, bannedCustomers, executor, monthCo
 
 function mergeBannedCustomers(target, extraCustomers) {
   for (let i = 0; i < extraCustomers.length; i++) {
-    target[extraCustomers[i]] = true;
+    target[normalizeCustomerNameKey(extraCustomers[i])] = true;
   }
 }
 
@@ -710,7 +717,7 @@ function approveTaskRegistry() {
   const ui = SpreadsheetApp.getUi();
 
   const registrySheet = getSheetByNameOrThrow(ss, 'Реестр');
-  const historySheet = getSheetByNameOrThrow(ss, 'История');
+  const historySheet = getHistorySheetOrThrow();
 
   const registryData = getSheetDataWithHeaders(registrySheet, [
     'Месяц',
@@ -1058,9 +1065,16 @@ function toTrimmedString(value) {
 
 function parseCommaSeparatedValues(value) {
   return toTrimmedString(value)
-    .split(',')
+    .split(/[,\n;\r]+/)
     .map(function (s) { return s.trim(); })
     .filter(function (s) { return s.length > 0; });
+}
+
+function normalizeCustomerNameKey(value) {
+  return toTrimmedString(value)
+    .replace(/\u00A0/g, ' ')
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
 }
 
 function shuffleArray(arr) {
