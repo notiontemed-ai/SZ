@@ -105,8 +105,8 @@ function prepareTaskRegistry() {
       monthCodeRaw
     );
     mergeBannedCustomers(bannedCustomers, executorInfo.bannedCustomers);
-    const pickedCustomers = pickTwoCustomers(customerPool, bannedCustomers, executor, monthCodeRaw);
-    const assignedCustomers = assignCustomersToTaskItems(taskSet, pickedCustomers[0], pickedCustomers[1]);
+    const pickedCustomers = pickAllowedCustomersForExecutor(customerPool, bannedCustomers, executor, monthCodeRaw);
+    const assignedCustomers = assignCustomersToTaskItems(taskSet, pickedCustomers);
 
     for (let j = 0; j < taskSet.length; j++) {
       const item = taskSet[j];
@@ -267,8 +267,8 @@ function buildCustomerPool(rows, headerMap) {
     customers.push(customer);
   }
 
-  if (customers.length < 2) {
-    throw new Error('На листе "Предприятия" должно быть минимум 2 уникальных непустых заказчика в колонке "Заказчик".');
+  if (customers.length < 1) {
+    throw new Error('На листе "Предприятия" должен быть минимум 1 уникальный непустой заказчик в колонке "Заказчик".');
   }
 
   return customers;
@@ -330,7 +330,7 @@ function buildRecentCustomerSetByInn(historyRows, historyHeaderMap, inn, monthCo
   return recentCustomers;
 }
 
-function pickTwoCustomers(availableCustomers, bannedCustomers, executor, monthCode) {
+function pickAllowedCustomersForExecutor(availableCustomers, bannedCustomers, executor, monthCode) {
   const allowed = [];
 
   for (let i = 0; i < availableCustomers.length; i++) {
@@ -340,11 +340,15 @@ function pickTwoCustomers(availableCustomers, bannedCustomers, executor, monthCo
     }
   }
 
-  if (allowed.length < 2) {
+  if (allowed.length === 0) {
     throw new Error(
       'Для исполнителя "' + executor + '" в месяце ' + monthCode +
-      ' после исключения заказчиков за два предыдущих месяца и запрещенных заказчиков осталось меньше двух доступных заказчиков.'
+      ' не осталось доступных заказчиков после исключения заказчиков за два предыдущих месяца и запрещенных заказчиков.'
     );
+  }
+
+  if (allowed.length === 1) {
+    return [allowed[0]];
   }
 
   shuffleArray(allowed);
@@ -357,15 +361,26 @@ function mergeBannedCustomers(target, extraCustomers) {
   }
 }
 
-function assignCustomersToTaskItems(taskSet, customerA, customerB) {
+function assignCustomersToTaskItems(taskSet, customers) {
   const count = taskSet.length;
   if (count === 0) {
     return [];
   }
+
+  if (customers.length === 1) {
+    const singleCustomer = customers[0];
+    const assignedSingle = [];
+    for (let i = 0; i < count; i++) {
+      assignedSingle.push(singleCustomer);
+    }
+    return assignedSingle;
+  }
+
+  const customerA = customers[0];
+  const customerB = customers[1];
   if (count === 1) {
     return [Math.random() < 0.5 ? customerA : customerB];
   }
-
   const assigned = [customerA, customerB];
   for (let i = 2; i < count; i++) {
     assigned.push(Math.random() < 0.5 ? customerA : customerB);
