@@ -854,7 +854,8 @@ function createXlsxFilesByCustomer(registryRows, registryHeaderMap) {
       continue;
     }
     const month = toTrimmedString(rows[0][registryHeaderMap['Месяц']]);
-    const fileName = sanitizeFileName(customer + '_' + month + '_Задание_Консоль_' + today + '.xlsx');
+    const customerForFileName = stripLeadingOoo(customer);
+    const fileName = sanitizeFileName(customerForFileName + '_' + month + '_Задание_Консоль_' + today + '.xlsx');
     const exportRows = buildExportRows(rows, registryHeaderMap, fileName);
     saveRowsAsXlsx(folder, fileName, exportRows);
   }
@@ -943,6 +944,7 @@ function saveRowsAsXlsx(folder, fileName, values) {
     const sheet = tempSpreadsheet.getSheets()[0];
     sheet.clear();
     sheet.getRange(1, 1, values.length, values[0].length).setValues(values);
+    SpreadsheetApp.flush();
 
     const url = 'https://docs.google.com/spreadsheets/d/' + tempSpreadsheet.getId() + '/export?format=xlsx';
     const response = UrlFetchApp.fetch(url, {
@@ -958,6 +960,11 @@ function saveRowsAsXlsx(folder, fileName, values) {
 
 function sanitizeFileName(name) {
   return name.replace(/[\\\/:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim();
+}
+
+function stripLeadingOoo(name) {
+  const normalized = toTrimmedString(name).replace(/^ООО\s+/i, '').trim();
+  return normalized || toTrimmedString(name);
 }
 
 function toIntegerOrThrow(value, message) {
