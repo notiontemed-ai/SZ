@@ -227,7 +227,9 @@ function buildExecutorMap(rows, headerMap) {
     const executor = toTrimmedString(rows[i][headerMap['Исполнитель']]);
     const inn = toTrimmedString(rows[i][headerMap['ИНН']]);
     const title = toTrimmedString(rows[i][headerMap['Название']]);
-    const bannedCustomers = parseCommaSeparatedValues(rows[i][headerMap['Запрещенные Заказчики']]);
+    const bannedCustomers = parseCommaSeparatedValues(rows[i][headerMap['Запрещенные Заказчики']])
+      .map(function (customer) { return canonicalCustomerValue(customer); })
+      .filter(function (customer) { return customer.length > 0; });
 
     if (!executor) {
       continue;
@@ -259,7 +261,7 @@ function buildCustomerPool(rows, headerMap) {
   const customers = [];
 
   for (let i = 0; i < rows.length; i++) {
-    const customer = toTrimmedString(rows[i][headerMap['Заказчик']]);
+    const customer = canonicalCustomerValue(rows[i][headerMap['Заказчик']]);
     if (!customer || uniqueMap[customer]) {
       continue;
     }
@@ -313,7 +315,7 @@ function buildRecentCustomerSetByInn(historyRows, historyHeaderMap, inn, monthCo
     const row = historyRows[i];
     const rowInn = toTrimmedString(row[historyHeaderMap['ИНН']]);
     const rowMonth = toTrimmedString(row[historyHeaderMap['Месяц']]);
-    const rowCustomer = toTrimmedString(row[historyHeaderMap['Заказчик']]);
+    const rowCustomer = canonicalCustomerValue(row[historyHeaderMap['Заказчик']]);
 
     if (!rowInn || !rowMonth || !rowCustomer) {
       continue;
@@ -325,7 +327,7 @@ function buildRecentCustomerSetByInn(historyRows, historyHeaderMap, inn, monthCo
       continue;
     }
 
-    recentCustomers[toTrimmedString(rowCustomer)] = true;
+    recentCustomers[rowCustomer] = true;
   }
   return recentCustomers;
 }
@@ -335,7 +337,7 @@ function pickAllowedCustomersForExecutor(availableCustomers, bannedCustomers, ex
 
   for (let i = 0; i < availableCustomers.length; i++) {
     const customer = availableCustomers[i];
-    if (!bannedCustomers[toTrimmedString(customer)]) {
+    if (!bannedCustomers[canonicalCustomerValue(customer)]) {
       allowed.push(customer);
     }
   }
@@ -357,7 +359,7 @@ function pickAllowedCustomersForExecutor(availableCustomers, bannedCustomers, ex
 
 function mergeBannedCustomers(target, extraCustomers) {
   for (let i = 0; i < extraCustomers.length; i++) {
-    target[toTrimmedString(extraCustomers[i])] = true;
+    target[canonicalCustomerValue(extraCustomers[i])] = true;
   }
 }
 
@@ -1100,6 +1102,15 @@ function parseCommaSeparatedValues(value) {
     .split(/[,\n;\r]+/)
     .map(function (s) { return s.trim(); })
     .filter(function (s) { return s.length > 0; });
+}
+
+function canonicalCustomerValue(value) {
+  let normalized = toTrimmedString(value);
+  if (normalized.length >= 2 && normalized[0] === '"' && normalized[normalized.length - 1] === '"') {
+    normalized = normalized.slice(1, -1);
+  }
+  normalized = normalized.replace(/""/g, '"').trim();
+  return normalized;
 }
 
 function normalizeCustomerNameKey(value) {
