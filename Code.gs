@@ -17,6 +17,8 @@ function prepareTaskRegistry() {
   const prepSheet = getSheetByNameOrThrow(ss, 'Подготовка реестра заданий');
   const executorsSheet = getSheetByNameOrThrow(ss, 'Список исполнителей');
   const servicesSheet = getSheetByNameOrThrow(ss, 'Реестр услуг');
+  const enterprisesSheet = getSheetByNameOrThrow(ss, 'Предприятия');
+  const historySheet = getSheetByNameOrThrow(ss, 'История');
   const registrySheet = getSheetByNameOrThrow(ss, 'Реестр');
 
   const prepData = getSheetDataWithHeaders(prepSheet, ['Месяц', 'Исполнитель', 'Сумма']);
@@ -29,10 +31,13 @@ function prepareTaskRegistry() {
     'Ед. изм.',
     'Категория услуги',
   ]);
+  const enterprisesData = getSheetDataWithHeaders(enterprisesSheet, ['Заказчик']);
+  const historyData = getSheetDataWithHeaders(historySheet, ['Месяц', 'Исполнитель', 'Заказчик']);
   const registryHeaders = getHeaderMapOrThrow(registrySheet, [
     'ИНН',
     'Период ОТ',
     'Период ДО',
+    'Заказчик',
     'Описание услуги',
     'Категория услуги',
     'Кол-во',
@@ -44,6 +49,7 @@ function prepareTaskRegistry() {
 
   const innMap = buildInnMap(executorsData.rows, executorsData.headerMap);
   const services = buildServices(servicesData.rows, servicesData.headerMap);
+  const customerPool = buildCustomerPool(enterprisesData.rows, enterprisesData.headerMap);
 
   const outputRows = [];
   for (let i = 0; i < prepData.rows.length; i++) {
@@ -79,6 +85,14 @@ function prepareTaskRegistry() {
     if (!taskSet) {
       throw new Error('Не удалось подобрать услуги на сумму ' + amount + ' для исполнителя ' + executor + '.');
     }
+    const bannedCustomers = buildRecentCustomerSet(
+      historyData.rows,
+      historyData.headerMap,
+      executor,
+      monthCodeRaw
+    );
+    const pickedCustomers = pickTwoCustomers(customerPool, bannedCustomers, executor, monthCodeRaw);
+    const assignedCustomers = assignCustomersToTaskItems(taskSet, pickedCustomers[0], pickedCustomers[1]);
 
     for (let j = 0; j < taskSet.length; j++) {
       const item = taskSet[j];
@@ -86,6 +100,7 @@ function prepareTaskRegistry() {
         inn: inn,
         periodFrom: period.from,
         periodTo: period.to,
+        customer: assignedCustomers[j],
         description: item.description,
         category: item.category,
         qty: item.qty,
@@ -191,6 +206,120 @@ function buildInnMap(rows, headerMap) {
     }
   }
   return map;
+}
+
+function buildCustomerPool(rows, headerMap) {
+  const uniqueMap = {};
+  const customers = [];
+
+  for (let i = 0; i < rows.length; i++) {
+    const customer = toTrimmedString(rows[i][headerMap['Заказчик']]);
+    if (!customer || uniqueMap[customer]) {
+      continue;
+    }
+    uniqueMap[customer] = true;
+    customers.push(customer);
+  }
+
+  if (customers.length < 2) {
+    throw new Error('На листе "Предприятия" должно быть минимум 2 уникальных непустых заказчика в колонке "Заказчик".');
+  }
+
+  return customers;
+}
+
+function getPreviousMonthCodes(monthCode, count) {
+  const value = toTrimmedString(monthCode);
+  if (!/^\d{4}$/.test(value)) {
+    throw new Error('Некорректный код месяца: ' + monthCode);
+  }
+
+  let yy = Number(value.slice(0, 2));
+  let mm = Number(value.slice(2, 4));
+  if (mm < 1 || mm > 12) {
+    throw new Error('Некорректный код месяца: ' + monthCode);
+  }
+
+  const result = [];
+  for (let i = 0; i < count; i++) {
+    mm -= 1;
+    if (mm < 1) {
+      mm = 12;
+      yy -= 1;
+      if (yy < 0) {
+        yy = 99;
+      }
+    }
+    result.push(pad2(yy) + pad2(mm));
+  }
+  return result;
+}
+
+function buildRecentCustomerSet(historyRows, historyHeaderMap, executor, monthCode) {
+  const previousMonths = getPreviousMonthCodes(monthCode, 2);
+  const monthMap = {};
+  for (let i = 0; i < previousMonths.length; i++) {
+    monthMap[previousMonths[i]] = true;
+  }
+
+  const recentCustomers = {};
+  for (let i = 0; i < historyRows.length; i++) {
+    const row = historyRows[i];
+    const rowExecutor = toTrimmedString(row[historyHeaderMap['Исполнитель']]);
+    const rowMonth = toTrimmedString(row[historyHeaderMap['Месяц']]);
+    const rowCustomer = toTrimmedString(row[historyHeaderMap['Заказчик']]);
+
+    if (!rowExecutor || !rowMonth || !rowCustomer) {
+      continue;
+    }
+    if (rowExecutor !== executor) {
+      continue;
+    }
+    if (!monthMap[rowMonth]) {
+      continue;
+    }
+
+    recentCustomers[rowCustomer] = true;
+  }
+  return recentCustomers;
+}
+
+function pickTwoCustomers(availableCustomers, bannedCustomers, executor, monthCode) {
+  const allowed = [];
+
+  for (let i = 0; i < availableCustomers.length; i++) {
+    const customer = availableCustomers[i];
+    if (!bannedCustomers[customer]) {
+      allowed.push(customer);
+    }
+  }
+
+  if (allowed.length < 2) {
+    throw new Error(
+      'Для исполнителя "' + executor + '" в месяце ' + monthCode +
+      ' после исключения заказчиков за два предыдущих месяца осталось меньше двух доступных заказчиков.'
+    );
+  }
+
+  shuffleArray(allowed);
+  return [allowed[0], allowed[1]];
+}
+
+function assignCustomersToTaskItems(taskSet, customerA, customerB) {
+  const count = taskSet.length;
+  if (count === 0) {
+    return [];
+  }
+  if (count === 1) {
+    return [Math.random() < 0.5 ? customerA : customerB];
+  }
+
+  const assigned = [customerA, customerB];
+  for (let i = 2; i < count; i++) {
+    assigned.push(Math.random() < 0.5 ? customerA : customerB);
+  }
+  shuffleArray(assigned);
+  return assigned;
 }
 
 function findInnByExecutor(innMap, executor) {
@@ -529,6 +658,7 @@ function buildRegistryRow(lastCol, registryHeaders, payload) {
   row[registryHeaders['ИНН']] = payload.inn;
   row[registryHeaders['Период ОТ']] = payload.periodFrom;
   row[registryHeaders['Период ДО']] = payload.periodTo;
+  row[registryHeaders['Заказчик']] = payload.customer;
   row[registryHeaders['Описание услуги']] = payload.description;
   row[registryHeaders['Категория услуги']] = payload.category;
   row[registryHeaders['Кол-во']] = payload.qty;
