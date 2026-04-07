@@ -221,18 +221,35 @@ function pad2(n) {
 
 function buildExecutorMap(rows, headerMap) {
   const map = {};
+  const executorRowMap = {};
   for (let i = 0; i < rows.length; i++) {
+    const rowNumber = i + 2;
     const executor = toTrimmedString(rows[i][headerMap['Исполнитель']]);
     const inn = toTrimmedString(rows[i][headerMap['ИНН']]);
     const title = toTrimmedString(rows[i][headerMap['Название']]);
     const bannedCustomers = parseCommaSeparatedValues(rows[i][headerMap['Запрещенные Заказчики']]);
-    if (executor && inn && title) {
-      map[executor] = {
-        inn: inn,
-        title: title,
-        bannedCustomers: bannedCustomers,
-      };
+
+    if (!executor) {
+      continue;
     }
+
+    if (executorRowMap[executor]) {
+      throw new Error(
+        'На листе "Список исполнителей" обнаружен дубликат в колонке "Исполнитель": "' +
+        executor + '" (строки ' + executorRowMap[executor] + ' и ' + rowNumber + ').'
+      );
+    }
+    executorRowMap[executor] = rowNumber;
+
+    if (!inn) {
+      continue;
+    }
+
+    map[executor] = {
+      inn: inn,
+      title: title,
+      bannedCustomers: bannedCustomers,
+    };
   }
   return map;
 }
@@ -308,7 +325,7 @@ function buildRecentCustomerSetByInn(historyRows, historyHeaderMap, inn, monthCo
       continue;
     }
 
-    recentCustomers[normalizeCustomerNameKey(rowCustomer)] = true;
+    recentCustomers[toTrimmedString(rowCustomer)] = true;
   }
   return recentCustomers;
 }
@@ -318,7 +335,7 @@ function pickTwoCustomers(availableCustomers, bannedCustomers, executor, monthCo
 
   for (let i = 0; i < availableCustomers.length; i++) {
     const customer = availableCustomers[i];
-    if (!bannedCustomers[normalizeCustomerNameKey(customer)]) {
+    if (!bannedCustomers[toTrimmedString(customer)]) {
       allowed.push(customer);
     }
   }
@@ -326,7 +343,7 @@ function pickTwoCustomers(availableCustomers, bannedCustomers, executor, monthCo
   if (allowed.length < 2) {
     throw new Error(
       'Для исполнителя "' + executor + '" в месяце ' + monthCode +
-      ' после исключения заказчиков за два предыдущих месяца осталось меньше двух доступных заказчиков.'
+      ' после исключения заказчиков за два предыдущих месяца и запрещенных заказчиков осталось меньше двух доступных заказчиков.'
     );
   }
 
@@ -336,7 +353,7 @@ function pickTwoCustomers(availableCustomers, bannedCustomers, executor, monthCo
 
 function mergeBannedCustomers(target, extraCustomers) {
   for (let i = 0; i < extraCustomers.length; i++) {
-    target[normalizeCustomerNameKey(extraCustomers[i])] = true;
+    target[toTrimmedString(extraCustomers[i])] = true;
   }
 }
 
