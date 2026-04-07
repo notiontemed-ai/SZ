@@ -959,7 +959,11 @@ function saveRowsAsXlsx(folder, fileName, values) {
 }
 
 function sanitizeFileName(name) {
-  return name.replace(/[\\\/:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim();
+  return name
+    .replace(/[\\\/:*?"<>|]/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^_+/, '');
 }
 
 function stripLeadingOoo(name) {
