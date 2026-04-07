@@ -23,7 +23,12 @@ function prepareTaskRegistry() {
   const registrySheet = getSheetByNameOrThrow(ss, 'Реестр');
 
   const prepData = getSheetDataWithHeaders(prepSheet, ['Месяц', 'Исполнитель', 'Сумма']);
-  const executorsData = getSheetDataWithHeaders(executorsSheet, ['Исполнитель', 'ИНН']);
+  const executorsData = getSheetDataWithHeaders(executorsSheet, [
+    'Исполнитель',
+    'ИНН',
+    'Название',
+    'Запрещенные Заказчики',
+  ]);
   const servicesData = getSheetDataWithHeaders(servicesSheet, [
     'Исполнитель',
     'Наименование, описание и результат оказания услуги',
@@ -38,6 +43,7 @@ function prepareTaskRegistry() {
     'Месяц',
     'ИНН',
     'ФИО',
+    'Название',
     'Период ОТ',
     'Период ДО',
     'Заказчик',
@@ -51,7 +57,7 @@ function prepareTaskRegistry() {
 
   clearRegistryData(registrySheet);
 
-  const innMap = buildInnMap(executorsData.rows, executorsData.headerMap);
+  const executorMap = buildExecutorMap(executorsData.rows, executorsData.headerMap);
   const services = buildServices(servicesData.rows, servicesData.headerMap);
   const customerPool = buildCustomerPool(enterprisesData.rows, enterprisesData.headerMap);
 
@@ -78,7 +84,8 @@ function prepareTaskRegistry() {
     }
 
     const period = parseMonthCode(monthCodeRaw);
-    const inn = findInnByExecutor(innMap, executor);
+    const executorInfo = findExecutorInfoOrThrow(executorMap, executor);
+    const inn = executorInfo.inn;
     const servicesForExecutor = filterServicesForExecutor(services, executor);
 
     if (servicesForExecutor.length === 0) {
@@ -95,6 +102,7 @@ function prepareTaskRegistry() {
       inn,
       monthCodeRaw
     );
+    mergeBannedCustomers(bannedCustomers, executorInfo.bannedCustomers);
     const pickedCustomers = pickTwoCustomers(customerPool, bannedCustomers, executor, monthCodeRaw);
     const assignedCustomers = assignCustomersToTaskItems(taskSet, pickedCustomers[0], pickedCustomers[1]);
 
@@ -104,6 +112,7 @@ function prepareTaskRegistry() {
         month: monthCodeRaw,
         inn: inn,
         fullName: executor,
+        title: executorInfo.title,
         periodFrom: period.from,
         periodTo: period.to,
         customer: assignedCustomers[j],
@@ -203,13 +212,19 @@ function pad2(n) {
   return n < 10 ? '0' + n : String(n);
 }
 
-function buildInnMap(rows, headerMap) {
+function buildExecutorMap(rows, headerMap) {
   const map = {};
   for (let i = 0; i < rows.length; i++) {
     const executor = toTrimmedString(rows[i][headerMap['Исполнитель']]);
     const inn = toTrimmedString(rows[i][headerMap['ИНН']]);
-    if (executor && inn) {
-      map[executor] = inn;
+    const title = toTrimmedString(rows[i][headerMap['Название']]);
+    const bannedCustomers = parseCommaSeparatedValues(rows[i][headerMap['Запрещенные Заказчики']]);
+    if (executor && inn && title) {
+      map[executor] = {
+        inn: inn,
+        title: title,
+        bannedCustomers: bannedCustomers,
+      };
     }
   }
   return map;
@@ -312,6 +327,12 @@ function pickTwoCustomers(availableCustomers, bannedCustomers, executor, monthCo
   return [allowed[0], allowed[1]];
 }
 
+function mergeBannedCustomers(target, extraCustomers) {
+  for (let i = 0; i < extraCustomers.length; i++) {
+    target[extraCustomers[i]] = true;
+  }
+}
+
 function assignCustomersToTaskItems(taskSet, customerA, customerB) {
   const count = taskSet.length;
   if (count === 0) {
@@ -329,11 +350,11 @@ function assignCustomersToTaskItems(taskSet, customerA, customerB) {
   return assigned;
 }
 
-function findInnByExecutor(innMap, executor) {
-  if (!innMap[executor]) {
-    throw new Error('Не найден ИНН для исполнителя: ' + executor);
+function findExecutorInfoOrThrow(executorMap, executor) {
+  if (!executorMap[executor]) {
+    throw new Error('Не найдены данные (ИНН, Название) для исполнителя: ' + executor);
   }
-  return innMap[executor];
+  return executorMap[executor];
 }
 
 function buildServices(rows, headerMap) {
@@ -666,6 +687,7 @@ function buildRegistryRow(lastCol, registryHeaders, payload) {
   row[registryHeaders['Месяц']] = payload.month;
   row[registryHeaders['ИНН']] = payload.inn;
   row[registryHeaders['ФИО']] = payload.fullName;
+  row[registryHeaders['Название']] = payload.title;
   row[registryHeaders['Период ОТ']] = payload.periodFrom;
   row[registryHeaders['Период ДО']] = payload.periodTo;
   row[registryHeaders['Заказчик']] = payload.customer;
@@ -694,6 +716,7 @@ function approveTaskRegistry() {
     'Месяц',
     'ИНН',
     'ФИО',
+    'Название',
     'Заказчик',
     'Период ОТ',
     'Период ДО',
@@ -727,6 +750,9 @@ function approveTaskRegistry() {
   }
 
   createXlsxFilesByCustomer(filledRegistryRows, registryData.headerMap);
+
+  const summaryMessage = buildApprovalSummaryMessage(filledRegistryRows, registryData.headerMap);
+  ui.alert('Задание утверждено', summaryMessage, ui.ButtonSet.OK);
 }
 
 function getFilledRegistryRows(rows, headerMap) {
@@ -819,6 +845,7 @@ function mapRegistryRowsToHistoryRows(historySheet, registryRows, registryHeader
     fillIfPresent(row, historyHeaders, 'Месяц', registryRow, registryHeaderMap, 'Месяц');
     fillIfPresent(row, historyHeaders, 'ИНН', registryRow, registryHeaderMap, 'ИНН');
     fillIfPresent(row, historyHeaders, 'ФИО', registryRow, registryHeaderMap, 'ФИО');
+    fillIfPresent(row, historyHeaders, 'Название', registryRow, registryHeaderMap, 'Название');
     fillIfPresent(row, historyHeaders, 'Заказчик', registryRow, registryHeaderMap, 'Заказчик');
     fillIfPresent(row, historyHeaders, 'Период ОТ', registryRow, registryHeaderMap, 'Период ОТ');
     fillIfPresent(row, historyHeaders, 'Период ДО', registryRow, registryHeaderMap, 'Период ДО');
@@ -859,6 +886,52 @@ function createXlsxFilesByCustomer(registryRows, registryHeaderMap) {
     const exportRows = buildExportRows(rows, registryHeaderMap, fileName);
     saveRowsAsXlsx(folder, fileName, exportRows);
   }
+}
+
+function buildApprovalSummaryMessage(registryRows, headerMap) {
+  const byExecutor = {};
+
+  for (let i = 0; i < registryRows.length; i++) {
+    const row = registryRows[i];
+    const executor = toTrimmedString(row[headerMap['ФИО']]);
+    const customer = toTrimmedString(row[headerMap['Заказчик']]);
+    const cost = Number(row[headerMap['Стоимость']]);
+
+    if (!executor) {
+      continue;
+    }
+    if (!byExecutor[executor]) {
+      byExecutor[executor] = {
+        total: 0,
+        customers: {},
+      };
+    }
+
+    if (Number.isFinite(cost)) {
+      byExecutor[executor].total += cost;
+    }
+    if (customer) {
+      byExecutor[executor].customers[customer] = true;
+    }
+  }
+
+  const executors = Object.keys(byExecutor).sort();
+  if (executors.length === 0) {
+    return 'Утверждение выполнено.';
+  }
+
+  const lines = [];
+  for (let i = 0; i < executors.length; i++) {
+    const executor = executors[i];
+    const item = byExecutor[executor];
+    const customers = Object.keys(item.customers).sort();
+    const customersText = customers.length > 0 ? customers.join(', ') : '—';
+    lines.push(
+      executor + ': назначено заданий на сумму ' + item.total + ' в организациях: ' + customersText + '.'
+    );
+  }
+
+  return lines.join('\n');
 }
 
 function groupRegistryRowsByCustomer(registryRows, registryHeaderMap) {
@@ -912,7 +985,7 @@ function buildExportRows(rows, headerMap, fileName) {
       '',
       row[headerMap['ИНН']],
       row[headerMap['ФИО']],
-      '',
+      row[headerMap['Название']],
       '',
       '',
       '',
@@ -981,6 +1054,13 @@ function toIntegerOrThrow(value, message) {
 
 function toTrimmedString(value) {
   return value === null || value === undefined ? '' : String(value).trim();
+}
+
+function parseCommaSeparatedValues(value) {
+  return toTrimmedString(value)
+    .split(',')
+    .map(function (s) { return s.trim(); })
+    .filter(function (s) { return s.length > 0; });
 }
 
 function shuffleArray(arr) {
