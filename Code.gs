@@ -24,7 +24,13 @@ function prepareTaskRegistry() {
   const historySheet = getHistorySheetOrThrow();
   const registrySheet = getSheetByNameOrThrow(ss, 'Реестр');
 
-  const prepData = getSheetDataWithHeaders(prepSheet, ['Месяц', 'Исполнитель', 'Сумма']);
+  const prepData = getSheetDataWithHeaders(prepSheet, [
+    'Месяц',
+    'Дата начала',
+    'Дата окончания',
+    'Исполнитель',
+    'Сумма',
+  ]);
   const executorsData = getSheetDataWithHeaders(executorsSheet, [
     'Исполнитель',
     'ИНН',
@@ -42,7 +48,7 @@ function prepareTaskRegistry() {
   const enterprisesData = getSheetDataWithHeaders(enterprisesSheet, ['Заказчик']);
   const historyData = getSheetDataWithHeaders(historySheet, ['Месяц', 'ИНН', 'Заказчик']);
   const registryHeaders = getHeaderMapOrThrow(registrySheet, [
-    'Месяц',
+    'Служебный месяц',
     'ИНН',
     'ФИО',
     'Название',
@@ -69,14 +75,29 @@ function prepareTaskRegistry() {
     const row = prepData.rows[i];
 
     const monthCodeRaw = toTrimmedString(row[prepData.headerMap['Месяц']]);
+    const dateStartRaw = row[prepData.headerMap['Дата начала']];
+    const dateEndRaw = row[prepData.headerMap['Дата окончания']];
     const executor = toTrimmedString(row[prepData.headerMap['Исполнитель']]);
     const amountRaw = row[prepData.headerMap['Сумма']];
 
-    if (!monthCodeRaw && !executor && (amountRaw === '' || amountRaw === null)) {
+    if (
+      !monthCodeRaw &&
+      !dateStartRaw &&
+      !dateEndRaw &&
+      !executor &&
+      (amountRaw === '' || amountRaw === null)
+    ) {
       continue;
     }
 
-    if (!monthCodeRaw || !executor || amountRaw === '' || amountRaw === null) {
+    if (
+      !monthCodeRaw ||
+      !dateStartRaw ||
+      !dateEndRaw ||
+      !executor ||
+      amountRaw === '' ||
+      amountRaw === null
+    ) {
       throw new Error('Неполные данные в строке ' + sourceRowNumber + ' листа "Подготовка реестра заданий".');
     }
 
@@ -85,7 +106,10 @@ function prepareTaskRegistry() {
       throw new Error('Сумма должна быть больше 0 в строке ' + sourceRowNumber + '.');
     }
 
-    const period = parseMonthCode(monthCodeRaw);
+    const period = {
+      from: formatDateInputToDDMMYY(dateStartRaw, 'Дата начала', sourceRowNumber),
+      to: formatDateInputToDDMMYY(dateEndRaw, 'Дата окончания', sourceRowNumber),
+    };
     const executorInfo = findExecutorInfoOrThrow(executorMap, executor);
     const inn = executorInfo.inn;
     const servicesForExecutor = filterServicesForExecutor(services, executor);
@@ -214,6 +238,48 @@ function formatDateDDMMYY(date) {
   const yy = pad2(date.getFullYear() % 100);
   return dd + '/' + mm + '/' + yy;
 }
+
+function formatDateInputToDDMMYY(value, columnName, rowNumber) {
+  if (value instanceof Date && !isNaN(value.getTime())) {
+    return formatDateDDMMYY(value);
+  }
+
+  const text = toTrimmedString(value);
+  if (!text) {
+    throw new Error('Пустое значение в колонке "' + columnName + '", строка ' + rowNumber + '.');
+  }
+
+  const match = text.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{2}|\d{4})$/);
+  if (!match) {
+    throw new Error(
+      'Некорректная дата в колонке "' + columnName + '", строка ' + rowNumber +
+      ': ' + text + '. Ожидаемый формат: ДД.ММ.ГГГГ или ДД/ММ/ГГ.'
+    );
+  }
+
+  const dd = Number(match[1]);
+  const mm = Number(match[2]);
+  let year = Number(match[3]);
+
+  if (year < 100) {
+    year = 2000 + year;
+  }
+
+  const date = new Date(year, mm - 1, dd);
+  if (
+    date.getFullYear() !== year ||
+    date.getMonth() !== mm - 1 ||
+    date.getDate() !== dd
+  ) {
+    throw new Error(
+      'Некорректная дата в колонке "' + columnName + '", строка ' + rowNumber +
+      ': ' + text + '.'
+    );
+  }
+
+  return formatDateDDMMYY(date);
+}
+
 
 function pad2(n) {
   return n < 10 ? '0' + n : String(n);
@@ -725,7 +791,9 @@ function randomIntInclusive(min, max) {
 
 function buildRegistryRow(lastCol, registryHeaders, payload) {
   const row = new Array(lastCol).fill('');
-  row[registryHeaders['Месяц']] = payload.month;
+  if (registryHeaders['Служебный месяц'] !== undefined) {
+    row[registryHeaders['Служебный месяц']] = payload.month;
+  }
   row[registryHeaders['ИНН']] = payload.inn;
   row[registryHeaders['ФИО']] = payload.fullName;
   row[registryHeaders['Название']] = payload.title;
@@ -754,7 +822,7 @@ function approveTaskRegistry() {
   const historySheet = getHistorySheetOrThrow();
 
   const registryData = getSheetDataWithHeaders(registrySheet, [
-    'Месяц',
+    'Служебный месяц',
     'ИНН',
     'ФИО',
     'Название',
@@ -800,7 +868,7 @@ function getFilledRegistryRows(rows, headerMap) {
   const result = [];
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
-    const month = toTrimmedString(row[headerMap['Месяц']]);
+    const month = toTrimmedString(row[headerMap['Служебный месяц']]);
     const inn = toTrimmedString(row[headerMap['ИНН']]);
     const fullName = toTrimmedString(row[headerMap['ФИО']]);
     const customer = toTrimmedString(row[headerMap['Заказчик']]);
@@ -834,7 +902,7 @@ function findConflictingKeys(historyRows, historyHeaderMap, registryRows, regist
   const conflicts = {};
   for (let i = 0; i < registryRows.length; i++) {
     const row = registryRows[i];
-    const key = buildInnMonthKey(row[registryHeaderMap['ИНН']], row[registryHeaderMap['Месяц']]);
+    const key = buildInnMonthKey(row[registryHeaderMap['ИНН']], row[registryHeaderMap['Служебный месяц']]);
     if (historyKeys[key]) {
       conflicts[key] = true;
     }
@@ -883,7 +951,9 @@ function mapRegistryRowsToHistoryRows(historySheet, registryRows, registryHeader
   for (let i = 0; i < registryRows.length; i++) {
     const registryRow = registryRows[i];
     const row = new Array(historySheet.getLastColumn()).fill('');
-    fillIfPresent(row, historyHeaders, 'Месяц', registryRow, registryHeaderMap, 'Месяц');
+    if (historyHeaders['Месяц'] !== undefined && registryHeaderMap['Служебный месяц'] !== undefined) {
+      row[historyHeaders['Месяц']] = registryRow[registryHeaderMap['Служебный месяц']];
+    }
     fillIfPresent(row, historyHeaders, 'ИНН', registryRow, registryHeaderMap, 'ИНН');
     fillIfPresent(row, historyHeaders, 'ФИО', registryRow, registryHeaderMap, 'ФИО');
     fillIfPresent(row, historyHeaders, 'Название', registryRow, registryHeaderMap, 'Название');
@@ -921,7 +991,7 @@ function createXlsxFilesByCustomer(registryRows, registryHeaderMap) {
     if (rows.length === 0) {
       continue;
     }
-    const month = toTrimmedString(rows[0][registryHeaderMap['Месяц']]);
+    const month = toTrimmedString(rows[0][registryHeaderMap['Служебный месяц']]);
     const customerForFileName = stripLeadingOoo(customer);
     const fileName = sanitizeFileName(customerForFileName + '_' + month + '_Задание_Консоль_' + today + '.xlsx');
     const exportRows = buildExportRows(rows, registryHeaderMap, fileName);
@@ -1035,7 +1105,7 @@ function buildExportRows(rows, headerMap, fileName) {
       '',
       '',
       '',
-      fileName,
+      buildInternalComment(fileName, row[headerMap['Служебный месяц']]),
       row[headerMap['Категория услуги']],
       row[headerMap['Описание услуги']],
       row[headerMap['Единица']],
@@ -1050,6 +1120,22 @@ function buildExportRows(rows, headerMap, fileName) {
     ]);
   }
   return out;
+}
+
+
+function buildInternalComment(baseComment, monthCode) {
+  const comment = toTrimmedString(baseComment);
+  const month = toTrimmedString(monthCode);
+
+  if (!month) {
+    return comment;
+  }
+
+  if (!comment) {
+    return '(' + month + ')';
+  }
+
+  return comment + ' (' + month + ')';
 }
 
 function saveRowsAsXlsx(folder, fileName, values) {
