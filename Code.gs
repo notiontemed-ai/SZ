@@ -1,4 +1,5 @@
 const HISTORY_SPREADSHEET_ID = '1A6eXDmV5VCTCctYNoilVDPIdc257ZipqGwetiRIWRaI';
+const MAX_QTY_FOR_PIECE = 200;
 
 /**
  * Добавляет пользовательское меню.
@@ -738,7 +739,11 @@ function buildPriceCandidates(minPrice, maxPrice, preferredPrice) {
 
 function getQtyCandidates(service) {
   if (service.unit === 'Штука') {
-    return [1, 2, 3, 4, 5];
+    const candidates = [];
+    for (let qty = 1; qty <= MAX_QTY_FOR_PIECE; qty++) {
+      candidates.push(qty);
+    }
+    return candidates;
   }
   return [1];
 }
@@ -748,7 +753,7 @@ function getMinTotalForService(service) {
 }
 
 function getMaxTotalForService(service) {
-  const maxQty = service.unit === 'Штука' ? 5 : 1;
+  const maxQty = service.unit === 'Штука' ? MAX_QTY_FOR_PIECE : 1;
   return maxQty * service.maxCost;
 }
 
