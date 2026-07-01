@@ -37,6 +37,7 @@ function prepareTaskRegistry() {
     'ИНН',
     'Название',
     'Запрещенные Заказчики',
+    'Единственный заказчик',
   ]);
   const servicesData = getSheetDataWithHeaders(servicesSheet, [
     'Исполнитель',
@@ -123,14 +124,19 @@ function prepareTaskRegistry() {
     if (!taskSet) {
       throw new Error('Не удалось подобрать услуги на сумму ' + amount + ' для исполнителя ' + executor + '.');
     }
-    const bannedCustomers = buildRecentCustomerSetByInn(
-      historyData.rows,
-      historyData.headerMap,
-      inn,
-      monthCodeRaw
-    );
-    mergeBannedCustomers(bannedCustomers, executorInfo.bannedCustomers);
-    const pickedCustomers = pickAllowedCustomersForExecutor(customerPool, bannedCustomers, executor, monthCodeRaw);
+    let pickedCustomers;
+    if (executorInfo.fixedCustomers.length > 0) {
+      pickedCustomers = executorInfo.fixedCustomers;
+    } else {
+      const bannedCustomers = buildRecentCustomerSetByInn(
+        historyData.rows,
+        historyData.headerMap,
+        inn,
+        monthCodeRaw
+      );
+      mergeBannedCustomers(bannedCustomers, executorInfo.bannedCustomers);
+      pickedCustomers = pickAllowedCustomersForExecutor(customerPool, bannedCustomers, executor, monthCodeRaw);
+    }
     const assignedCustomers = assignCustomersToTaskItems(taskSet, pickedCustomers);
 
     for (let j = 0; j < taskSet.length; j++) {
@@ -297,9 +303,18 @@ function buildExecutorMap(rows, headerMap) {
     const bannedCustomers = parseCommaSeparatedValues(rows[i][headerMap['Запрещенные Заказчики']])
       .map(function (customer) { return canonicalCustomerValue(customer); })
       .filter(function (customer) { return customer.length > 0; });
+    const fixedCustomersRaw = toTrimmedString(rows[i][headerMap['Единственный заказчик']]);
+    const fixedCustomers = uniqueValues(parseCommaSeparatedValues(fixedCustomersRaw));
 
     if (!executor) {
       continue;
+    }
+
+    if (fixedCustomersRaw && fixedCustomers.length === 0) {
+      throw new Error(
+        'Для исполнителя "' + executor +
+        '" заполнена колонка "Единственный заказчик", но не найдено ни одного корректного заказчика.'
+      );
     }
 
     if (executorRowMap[executor]) {
@@ -318,9 +333,24 @@ function buildExecutorMap(rows, headerMap) {
       inn: inn,
       title: title,
       bannedCustomers: bannedCustomers,
+      fixedCustomers: fixedCustomers,
     };
   }
   return map;
+}
+
+function uniqueValues(values) {
+  const map = {};
+  const result = [];
+  for (let i = 0; i < values.length; i++) {
+    const value = canonicalCustomerValue(values[i]);
+    if (!value || map[value]) {
+      continue;
+    }
+    map[value] = true;
+    result.push(value);
+  }
+  return result;
 }
 
 function buildCustomerPool(rows, headerMap) {
@@ -436,24 +466,30 @@ function assignCustomersToTaskItems(taskSet, customers) {
     return [];
   }
 
+  if (!customers || customers.length === 0) {
+    throw new Error('Не передан список заказчиков для распределения заданий.');
+  }
+
   if (customers.length === 1) {
-    const singleCustomer = customers[0];
     const assignedSingle = [];
     for (let i = 0; i < count; i++) {
-      assignedSingle.push(singleCustomer);
+      assignedSingle.push(customers[0]);
     }
     return assignedSingle;
   }
 
-  const customerA = customers[0];
-  const customerB = customers[1];
-  if (count === 1) {
-    return [Math.random() < 0.5 ? customerA : customerB];
+  const assigned = [];
+  const shuffledCustomers = shuffleArray(customers.slice());
+  const requiredUniqueCount = Math.min(count, shuffledCustomers.length);
+
+  for (let i = 0; i < requiredUniqueCount; i++) {
+    assigned.push(shuffledCustomers[i]);
   }
-  const assigned = [customerA, customerB];
-  for (let i = 2; i < count; i++) {
-    assigned.push(Math.random() < 0.5 ? customerA : customerB);
+
+  for (let i = assigned.length; i < count; i++) {
+    assigned.push(shuffledCustomers[randomIntInclusive(0, shuffledCustomers.length - 1)]);
   }
+
   shuffleArray(assigned);
   return assigned;
 }
